@@ -9,10 +9,12 @@ import {
   MIN_TOTAL_QUESTIONS,
   QAPair,
 } from "@/lib/interview";
+import { API_KEY_HEADER } from "@/lib/apiKey";
 
-// 建立一個共用的 OpenAI client。金鑰從 .env.local 的 OPEN_AI_API_KEY 讀取，
-// Next.js 會在伺服器啟動時自動載入 .env.local，所以這裡可以直接用 process.env 取得。
-const client = new OpenAI({ apiKey: process.env.OPEN_AI_API_KEY });
+// BYOK（Bring Your Own Key）：這支 API 不會使用伺服器端的環境變數當作
+// OpenAI API Key，而是要求每個請求都透過 x-openai-api-key header 帶上
+// 使用者自己的金鑰（金鑰只存在使用者瀏覽器的 localStorage，見 lib/apiKey.ts），
+// 伺服器只用它建立一次性的 client，不會記錄或儲存這把金鑰。
 
 // 使用的模型名稱。可以用 .env.local 的 OPENAI_MODEL 覆寫，
 // 若沒有設定就 fallback 到 "gpt-4o-mini"（便宜且速度快，適合這種輪流問答的場景）。
@@ -66,7 +68,10 @@ function normalizeTotalQuestions(value: unknown): number {
  * 純粹根據職缺描述請 AI 出一題。
  * 這裡不需要 JSON 格式，因為只要「一段純文字問題」，用一般文字回覆即可。
  */
-async function generateFirstQuestion(jobDescription: string): Promise<string> {
+async function generateFirstQuestion(
+  client: OpenAI,
+  jobDescription: string
+): Promise<string> {
   const completion = await client.chat.completions.create({
     model: MODEL,
     messages: [
@@ -98,6 +103,7 @@ async function generateFirstQuestion(jobDescription: string): Promise<string> {
  * 這樣後端才能穩定地用 JSON.parse 解析，不用自己寫正則表達式去抽取欄位。
  */
 async function generateFeedbackAndNextQuestion(
+  client: OpenAI,
   jobDescription: string,
   history: QAPair[]
 ): Promise<{ suggestedAnswer: string; nextQuestion: string }> {
@@ -145,6 +151,7 @@ async function generateFeedbackAndNextQuestion(
  * 同時也會一併附上最後一題的 suggestedAnswer，維持體驗一致（每一題都有示範回答）。
  */
 async function generateFeedbackAndEvaluation(
+  client: OpenAI,
   jobDescription: string,
   history: QAPair[]
 ): Promise<{ suggestedAnswer: string; evaluation: Evaluation }> {
@@ -194,14 +201,16 @@ async function generateFeedbackAndEvaluation(
  * 3. 重複步驟 2，直到 history 的長度達到 totalQuestions，這時 API 會回傳 done: true 與 evaluation。
  */
 export async function POST(request: Request) {
-  // 防呆：如果 .env.local 沒有設定 OPEN_AI_API_KEY，直接回傳 500，
-  // 避免後面呼叫 OpenAI API 時才因為金鑰是 undefined 而丟出比較難懂的錯誤訊息。
-  if (!process.env.OPEN_AI_API_KEY) {
+  // BYOK：金鑰必須由前端透過 x-openai-api-key header 帶上（存在使用者瀏覽器的
+  // localStorage，見 lib/apiKey.ts），伺服器不會使用自己的環境變數當作金鑰。
+  const apiKey = request.headers.get(API_KEY_HEADER);
+  if (!apiKey || !apiKey.trim()) {
     return NextResponse.json(
-      { error: "伺服器未設定 OPEN_AI_API_KEY" },
-      { status: 500 }
+      { error: "請先在頁面上設定你的 OpenAI API Key" },
+      { status: 401 }
     );
   }
+  const client = new OpenAI({ apiKey });
 
   // 解析 request body 的 JSON。如果前端傳來的不是合法 JSON（例如空 body），
   // request.json() 會 throw，這裡用 try/catch 接住並回傳 400（Bad Request）。
@@ -231,7 +240,7 @@ export async function POST(request: Request) {
     // 判斷依據：只要 currentQuestion 或 answer 缺其中一個，就代表前端還沒有「已回答的題目」要送過來，
     // 也就是「使用者剛輸入完職缺描述，準備開始面試」的第一次請求。
     if (!currentQuestion || !answer) {
-      const question = await generateFirstQuestion(jobDescription);
+      const question = await generateFirstQuestion(client, jobDescription);
       const response: InterviewResponse = {
         done: false,
         history: [], // 還沒有任何完成的問答
@@ -253,6 +262,7 @@ export async function POST(request: Request) {
     if (isFinalQuestion) {
       // 面試結束：請 AI 產生「最後一題的建議回答」+「整體評分與建議」。
       const { suggestedAnswer, evaluation } = await generateFeedbackAndEvaluation(
+        client,
         jobDescription,
         // 把這次剛回答的題目也併入 history，讓 AI 能看到完整的最後一題內容再評分。
         [...priorHistory, { question: currentQuestion, answer }]
@@ -272,6 +282,7 @@ export async function POST(request: Request) {
 
     // 面試尚未結束：請 AI 產生「這一題的建議回答」+「下一題的題目」。
     const { suggestedAnswer, nextQuestion } = await generateFeedbackAndNextQuestion(
+      client,
       jobDescription,
       [...priorHistory, { question: currentQuestion, answer }]
     );
@@ -294,7 +305,7 @@ export async function POST(request: Request) {
     // 意指「我們的伺服器」呼叫「上游服務（OpenAI）」時失敗了），避免把內部錯誤細節暴露給前端。
     console.error("Interview API error:", error);
     return NextResponse.json(
-      { error: "呼叫 OpenAI API 時發生錯誤" },
+      { error: "呼叫 OpenAI API 時發生錯誤，請確認你輸入的 API Key 是否正確、額度是否足夠" },
       { status: 502 }
     );
   }

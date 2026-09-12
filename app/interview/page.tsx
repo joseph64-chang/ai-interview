@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, RotateCcw, Sparkles } from "lucide-react";
 import {
@@ -11,7 +11,14 @@ import {
   MIN_TOTAL_QUESTIONS,
   QAPair,
 } from "@/lib/interview";
+import {
+  API_KEY_HEADER,
+  clearStoredApiKey,
+  getStoredApiKey,
+  setStoredApiKey,
+} from "@/lib/apiKey";
 import Logo from "../components/Logo";
+import ApiKeySettings from "../components/ApiKeySettings";
 
 type Phase = "input" | "interviewing" | "done";
 
@@ -59,18 +66,41 @@ export default function InterviewPage() {
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState("");
+
+  // API Key 只存在瀏覽器的 localStorage，頁面掛載後才讀取，避免 SSR 階段存取 window。
+  useEffect(() => {
+    setApiKey(getStoredApiKey());
+  }, []);
+
+  function handleSaveApiKey(key: string) {
+    setStoredApiKey(key);
+    setApiKey(key);
+  }
+
+  function handleClearApiKey() {
+    clearStoredApiKey();
+    setApiKey("");
+  }
 
   async function callInterviewApi(payload: {
     history: QAPair[];
     currentQuestion?: string;
     answer?: string;
   }) {
+    if (!apiKey.trim()) {
+      setError("請先在下方設定你的 OpenAI API Key");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const res = await fetch("/api/interview", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          [API_KEY_HEADER]: apiKey,
+        },
         body: JSON.stringify({ jobDescription, totalQuestions, ...payload }),
       });
 
@@ -169,6 +199,14 @@ export default function InterviewPage() {
           )}
 
           {phase === "input" && (
+            <ApiKeySettings
+              apiKey={apiKey}
+              onSave={handleSaveApiKey}
+              onClear={handleClearApiKey}
+            />
+          )}
+
+          {phase === "input" && (
             <div className="flex flex-col gap-5 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
               <label className="flex flex-col gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 職缺描述
@@ -201,7 +239,7 @@ export default function InterviewPage() {
               <button
                 className="inline-flex items-center justify-center gap-2 self-start rounded-full bg-zinc-900 px-6 py-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-zinc-700 disabled:opacity-40 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
                 onClick={handleStart}
-                disabled={loading || !jobDescription.trim()}
+                disabled={loading || !jobDescription.trim() || !apiKey.trim()}
               >
                 <Sparkles className="h-4 w-4" />
                 {loading ? "產生問題中..." : "開始模擬面試"}
